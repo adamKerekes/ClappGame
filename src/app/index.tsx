@@ -1,4 +1,5 @@
 import { GLView, type ExpoWebGLRenderingContext } from 'expo-gl';
+import { type ErrorBoundaryProps } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -6,7 +7,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/theme';
 import { generateMaze } from '@/game/maze';
 import { stepBall, type Ball } from '@/game/physics';
-import { createScene } from '@/game/scene';
 import { useTilt } from '@/game/use-tilt';
 
 const maze = generateMaze();
@@ -17,18 +17,31 @@ function newBall(): Ball {
 
 /** Kör alakú 3D labirintus: a telefon döntésével kell a golyót középre juttatni. */
 export default function Game() {
-  const { tilt, status, start, calibrate } = useTilt();
+  const { tilt, status, motion, start, calibrate } = useTilt();
   const ball = useRef<Ball>(newBall());
   const playing = useRef(false);
   const frame = useRef<number | null>(null);
   const [won, setWon] = useState(false);
+  // A 3D nézet csak a kliensen indul (a webes szerveroldali renderelésbe nem kerül bele).
+  const [mounted, setMounted] = useState(false);
+  const [glError, setGlError] = useState<string | null>(null);
 
-  useEffect(() => () => {
-    if (frame.current !== null) cancelAnimationFrame(frame.current);
+  useEffect(() => {
+    setMounted(true);
+    return () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    };
   }, []);
 
-  function onContextCreate(gl: ExpoWebGLRenderingContext) {
-    const scene = createScene(gl, maze);
+  async function onContextCreate(gl: ExpoWebGLRenderingContext) {
+    let scene: { render: (p: { x: number; y: number }, t: { x: number; y: number }) => void };
+    try {
+      const { createScene } = await import('@/game/scene');
+      scene = createScene(gl, maze);
+    } catch (e) {
+      setGlError(e instanceof Error ? e.message : String(e));
+      return;
+    }
     let last = Date.now();
     const loop = () => {
       const now = Date.now();
@@ -38,7 +51,12 @@ export default function Game() {
         playing.current = false;
         setWon(true);
       }
-      scene.render(ball.current, tilt.current);
+      try {
+        scene.render(ball.current, tilt.current);
+      } catch (e) {
+        setGlError(e instanceof Error ? e.message : String(e));
+        return;
+      }
       frame.current = requestAnimationFrame(loop);
     };
     loop();
@@ -52,18 +70,21 @@ export default function Game() {
   }
 
   const started = status !== 'idle';
-  const keyboardHint = Platform.OS === 'web' && (status === 'unavailable' || status === 'denied');
+  const keyboardHint = Platform.OS === 'web' && started && status !== 'denied' && !motion;
+  const deniedHint = status === 'denied' && !motion;
 
   return (
     <View style={styles.screen}>
-      <GLView style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />
+      {mounted && <GLView style={StyleSheet.absoluteFill} onContextCreate={onContextCreate} />}
       <SafeAreaView style={styles.overlay} pointerEvents="box-none">
         <View style={styles.top} pointerEvents="none">
           <Text style={styles.title}>Labirintus</Text>
           <Text style={styles.hint}>
-            {keyboardHint
-              ? 'Nincs dőlésérzékelő: használd a nyilakat'
-              : status === 'denied'
+            {glError
+              ? `A 3D nézet nem indult el: ${glError}`
+              : keyboardHint
+              ? 'Várakozás a dőlésérzékelőre… (gépen a nyilakkal is megy)'
+              : deniedHint
                 ? 'A mozgásérzékelő engedélye nélkül nem megy a döntés'
                 : 'Döntsd a telefont, és juttasd a golyót középre!'}
           </Text>
@@ -91,8 +112,22 @@ export default function Game() {
   );
 }
 
+/** Hiba esetén fehér képernyő helyett a hibaüzenet látszik. */
+export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  return (
+    <View style={[styles.screen, styles.errorScreen]}>
+      <Text style={styles.title}>Hiba történt</Text>
+      <Text style={styles.hint}>{error.message}</Text>
+      <Pressable accessibilityRole="button" onPress={retry} style={styles.button}>
+        <Text style={styles.buttonText}>Újra</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#0b0d12' },
+  errorScreen: { alignItems: 'center', justifyContent: 'center', gap: 16 },
   overlay: { flex: 1, justifyContent: 'space-between' },
   top: { alignItems: 'center', paddingTop: 12, gap: 4 },
   title: { color: Colors.dark.text, fontSize: 28, fontWeight: '700' },

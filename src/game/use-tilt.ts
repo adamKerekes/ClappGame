@@ -20,13 +20,16 @@ export function useTilt() {
   const gravity = useRef<Tilt | null>(null);
   const neutral = useRef<Tilt | null>(null);
   const keys = useRef({ x: 0, y: 0 });
+  const hasMotion = useRef(false);
+  /** Érkezett-e már mérés az érzékelőtől. */
+  const [motion, setMotion] = useState(false);
 
   useEffect(() => {
-    if (status !== 'running') return;
-    DeviceMotion.setUpdateInterval(16);
-    const sub = DeviceMotion.addListener((m: DeviceMotionMeasurement) => {
-      const a = m.accelerationIncludingGravity;
-      if (!a) return;
+    // Weben elutasított engedélynél is figyelünk: ha mégis jönnek mérések, működik a döntés.
+    if (status !== 'running' && !(Platform.OS === 'web' && status === 'denied')) return;
+
+    const onGravity = (a: { x: number | null; y: number | null } | null | undefined) => {
+      if (!a || a.x == null || a.y == null) return;
       // Natívan (iOS, Android) a vektor a gravitáció irányába mutat, a böngészőben ellenkezőleg.
       const sign = Platform.OS === 'web' ? -1 : 1;
       // Képernyő-koordinátákra váltás: a készülék y tengelye felfelé mutat, a képernyőé lefelé.
@@ -38,7 +41,21 @@ export function useTilt() {
         x: tilt.current.x + (target.x - tilt.current.x) * SMOOTHING,
         y: tilt.current.y + (target.y - tilt.current.y) * SMOOTHING,
       };
-    });
+      if (!hasMotion.current) {
+        hasMotion.current = true;
+        setMotion(true);
+      }
+    };
+
+    // Weben közvetlenül a böngésző eseményét figyeljük (az expo-sensors webes ellenőrzése túl szigorú).
+    if (Platform.OS === 'web') {
+      const handler = (e: DeviceMotionEvent) => onGravity(e.accelerationIncludingGravity);
+      window.addEventListener('devicemotion', handler);
+      return () => window.removeEventListener('devicemotion', handler);
+    }
+
+    DeviceMotion.setUpdateInterval(16);
+    const sub = DeviceMotion.addListener((m: DeviceMotionMeasurement) => onGravity(m.accelerationIncludingGravity));
     return () => sub.remove();
   }, [status]);
 
@@ -73,6 +90,23 @@ export function useTilt() {
   const start = useCallback(async () => {
     neutral.current = null;
     tilt.current = { x: 0, y: 0 };
+    if (Platform.OS === 'web') {
+      if (typeof window === 'undefined' || typeof DeviceMotionEvent === 'undefined') {
+        setStatus('unavailable');
+        return;
+      }
+      // iOS Safari-n engedélyt kell kérni (gombnyomásból); Androidon nincs ilyen, vagy magától megadja.
+      const motionEvent = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> };
+      if (typeof motionEvent.requestPermission === 'function') {
+        const result = await motionEvent.requestPermission().catch(() => 'denied');
+        if (result !== 'granted') {
+          setStatus('denied');
+          return;
+        }
+      }
+      setStatus('running');
+      return;
+    }
     if (!(await DeviceMotion.isAvailableAsync().catch(() => false))) {
       setStatus('unavailable');
       return;
@@ -87,5 +121,5 @@ export function useTilt() {
     tilt.current = { x: 0, y: 0 };
   }, []);
 
-  return { tilt, status, start, calibrate };
+  return { tilt, status, motion, start, calibrate };
 }
