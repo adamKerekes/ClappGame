@@ -27,8 +27,10 @@ export default function Game() {
   const [glError, setGlError] = useState<string | null>(null);
 
   useEffect(() => {
-    setMounted(true);
+    // Natívan kicsit később indul a 3D nézet, hogy előbb a felület megjelenjen.
+    const timer = setTimeout(() => setMounted(true), Platform.OS === 'web' ? 0 : 600);
     return () => {
+      clearTimeout(timer);
       if (frame.current !== null) cancelAnimationFrame(frame.current);
     };
   }, []);
